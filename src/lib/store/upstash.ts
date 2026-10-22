@@ -8,7 +8,8 @@ const REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
 type Command = (string | number)[];
 
 async function redis<T = unknown>(commands: Command[]): Promise<T[]> {
-  const res = await fetch(REST_URL, {
+  // 管道模式：POST {url}/pipeline，body 为命令数组的数组（实测该实例不识别 ?pipeline=true 查询参数）
+  const res = await fetch(`${REST_URL}/pipeline`, {
     method: "POST",
     headers: { Authorization: `Bearer ${REST_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify(commands),
