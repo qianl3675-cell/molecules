@@ -1,0 +1,36 @@
+{
+  "name": "molecules",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Molecules —— 类 Atoms 的 AI Agent 应用生成平台（ROOT 笔试 Demo）",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.1.0",
+    "bcryptjs": "^3.0.3",
+    "lucide-react": "^1.61.0",
+    "next": "^15.5.28",
+    "prismjs": "^1.30.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.130",
+    "@types/prismjs": "^1.26.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "autoprefixer": "^10.6.1",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~5.9.0",
+    "vitest": "^2.1.9"
+  }
+}
