@@ -288,7 +288,8 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
 
   const exportHtml = () => {
     if (!project) return;
-    downloadText(`${project.title || "app"}.html`, assembleDocument(filesRef.current), "text/html");
+    const safeName = (project.title || "app").replace(/[/\\?%*:|"'<>]/g, "_");
+    downloadText(`${safeName}.html`, assembleDocument(filesRef.current), "text/html");
   };
 
   const previewDoc = useMemo(() => assembleDocument(previewFiles), [previewFiles]);
@@ -369,7 +370,6 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
             mode={mode}
             onSend={send}
             onStop={stop}
-            initialText={messages.length === 0 ? prefill : ""}
           />
         </aside>
 

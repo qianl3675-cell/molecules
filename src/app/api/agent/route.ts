@@ -8,7 +8,8 @@ import { AgentStreamParser } from "@/lib/agent/parser";
 import { sanitizeFiles } from "@/lib/http";
 import type { AgentEvent, ChatMessage } from "@/lib/types";
 
-export const maxDuration = 300;
+// Vercel Hobby 档函数超时上限为 60s，超出部分由客户端「停止」兜底
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   const user = await getSessionUser();
