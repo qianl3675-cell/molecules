@@ -44,7 +44,12 @@ npm run build      # 生产构建（TS 严格类型检查）
 
 覆盖：流式解析器（跨 chunk 半截标签/围栏容错/漏闭合容错）、预览组装器（内联替换/`</script>` 转义/替换特殊字符安全）、会话签名与口令哈希、文件存储适配器（CRUD/原子写/slug 索引）、意图识别与演示智能体事件流协议。
 
-## ☁️ 部署（Vercel）
+## ☁️ 部署
+
+> 本项目线上示例部署于 **Render**（免费档）：Build `npm install && npm run build` / Start `npm start` / Instance **Free**，环境变量见下表。免费档约 15 分钟无访问会休眠，首次打开约需 1 分钟唤醒。
+> 同样适用于 Vercel（导入仓库 + 环境变量即可）或任何 Node 宿主 / Docker。
+
+### Vercel 方式
 
 1. Fork / 导入本仓库到 Vercel；
 2. 创建免费 [Upstash Redis](https://upstash.com)（无需信用卡），复制 REST URL 与 Token；
