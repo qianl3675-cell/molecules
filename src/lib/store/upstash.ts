@@ -81,4 +81,13 @@ export class UpstashStore implements Store {
       .map((r) => JSON.parse(r) as Project)
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
+
+  async getAppData(projectId: string, userId: string): Promise<Record<string, string> | null> {
+    const raw = await get<string>(`pd:${projectId}:${userId}`);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : null;
+  }
+
+  async setAppData(projectId: string, userId: string, data: Record<string, string>): Promise<void> {
+    await redis([["SET", `pd:${projectId}:${userId}`, JSON.stringify(data)]]);
+  }
 }

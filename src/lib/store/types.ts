@@ -10,4 +10,7 @@ export interface Store {
   saveProject(project: Project): Promise<void>;
   deleteProject(id: string): Promise<void>;
   listProjects(userId: string): Promise<Project[]>;
+  /** 生成应用的业务数据（localStorage 持久化桥），按 项目+用户 维度 */
+  getAppData(projectId: string, userId: string): Promise<Record<string, string> | null>;
+  setAppData(projectId: string, userId: string, data: Record<string, string>): Promise<void>;
 }

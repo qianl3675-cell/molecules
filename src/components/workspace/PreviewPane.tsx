@@ -16,12 +16,18 @@ export function PreviewPane({
   onLog,
   onClearLogs,
   projectTitle,
+  onDataSave,
+  onReady,
 }: {
   doc: string;
   logs: LogItem[];
   onLog: (l: LogItem) => void;
   onClearLogs: () => void;
   projectTitle: string;
+  /** 沙箱内 localStorage 变更上报（持久化桥） */
+  onDataSave?: (data: Record<string, string>) => void;
+  /** 沙箱应用加载就绪（自检信号） */
+  onReady?: () => void;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
   const [showConsole, setShowConsole] = useState(false);
@@ -30,6 +36,10 @@ export function PreviewPane({
   const consoleRef = useRef<HTMLDivElement>(null);
   const onLogRef = useRef(onLog);
   onLogRef.current = onLog;
+  const onDataSaveRef = useRef(onDataSave);
+  onDataSaveRef.current = onDataSave;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   // 组装文档 -> blob URL（doc 变化或手动刷新时重建）
   useEffect(() => {
@@ -38,16 +48,26 @@ export function PreviewPane({
     return () => URL.revokeObjectURL(u);
   }, [doc, nonce]);
 
-  // 监听沙箱 harness 上报
+  // 监听沙箱 harness 上报（console / storage / ready）
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      const d = e.data as { __molecules?: number; type?: string; payload?: { level?: string; args?: string[] } };
-      if (!d || d.__molecules !== 1 || d.type !== "console") return;
-      onLogRef.current({
-        level: (d.payload?.level as LogItem["level"]) ?? "log",
-        text: (d.payload?.args ?? []).join(" "),
-        ts: Date.now(),
-      });
+      const d = e.data as {
+        __molecules?: number;
+        type?: string;
+        payload?: { level?: string; args?: string[] };
+      };
+      if (!d || d.__molecules !== 1) return;
+      if (d.type === "console") {
+        onLogRef.current({
+          level: (d.payload?.level as LogItem["level"]) ?? "log",
+          text: (d.payload?.args ?? []).join(" "),
+          ts: Date.now(),
+        });
+      } else if (d.type === "storage" && d.payload && typeof d.payload === "object") {
+        onDataSaveRef.current?.(d.payload as Record<string, string>);
+      } else if (d.type === "ready") {
+        onReadyRef.current?.();
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);

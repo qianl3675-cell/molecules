@@ -9,9 +9,10 @@ interface DB {
   usernames: Record<string, string>;
   projects: Record<string, Project>;
   slugs: Record<string, string>;
+  appData: Record<string, Record<string, string>>;
 }
 
-const emptyDB = (): DB => ({ users: {}, usernames: {}, projects: {}, slugs: {} });
+const emptyDB = (): DB => ({ users: {}, usernames: {}, projects: {}, slugs: {}, appData: {} });
 
 export class FileStore implements Store {
   private file: string;
@@ -90,5 +91,14 @@ export class FileStore implements Store {
     return Object.values(this.db.projects)
       .filter((p) => p.ownerId === userId)
       .sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+
+  async getAppData(projectId: string, userId: string) {
+    return this.db.appData[`${projectId}:${userId}`] ?? null;
+  }
+
+  async setAppData(projectId: string, userId: string, data: Record<string, string>) {
+    this.db.appData[`${projectId}:${userId}`] = data;
+    this.save();
   }
 }

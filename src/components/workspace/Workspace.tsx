@@ -1,7 +1,10 @@
 "use client";
 // 工作台主组件：聊天驱动智能体（真模型 NDJSON 流 / 演示模式本地生成器）→
 // 文件实时写入 → 沙箱预览；支持人工改码、版本回滚、公开分享、导出。
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+// 生成后自检闭环：语法校验 + 沙箱试运行（4.5s 错误观察窗）→ 自动修复（≤2 轮）→
+// 通过后才提示「已完成」，失败时给出明确问题清单。
+// 持久化桥：沙箱内 localStorage 经 harness postMessage 上报 → 落库（项目+用户维度）。
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ChatPanel, type StreamingState } from "./ChatPanel";
@@ -14,12 +17,15 @@ import { Logo } from "@/components/Logo";
 import { Button, Spinner, Tabs, toast } from "@/components/ui";
 import { api, fetchAgentStatus, getLocalKey, type AgentMode } from "@/lib/client";
 import { assembleDocument } from "@/lib/agent/assemble";
+import { validateFiles, type ValidationIssue } from "@/lib/agent/validate";
 import { runDemoAgent } from "@/lib/agent/demo";
 import { downloadText } from "@/lib/utils";
 import type { AgentEvent, ChatMessage, Project, VersionSnapshot } from "@/lib/types";
 import { ArrowLeft, Download, History, Settings, Share2 } from "lucide-react";
 
 const IDLE_STREAMING: StreamingState = { active: false, plan: "", stage: "", thinking: "", currentPath: null, doneFiles: [] };
+const RUNTIME_CHECK_MS = 4500;
+const MAX_REPAIR_ROUNDS = 2;
 
 export function Workspace({ id, prefill }: { id: string; prefill: string }) {
   const router = useRouter();
@@ -41,12 +47,21 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
 
   const filesRef = useRef(files);
   const messagesRef = useRef(messages);
+  const logsRef = useRef(logs);
+  const streamingRef = useRef(streaming);
   const abortRef = useRef<AbortController | null>(null);
   const stopRef = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dataSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoSent = useRef(false);
+  const readyAtRef = useRef(0);
+  const repairRoundRef = useRef(0);
+  /** 应用数据快照：每次打开项目时拉取一次，之后只写不读（避免预览重载循环） */
+  const appDataRef = useRef<Record<string, string>>({});
   filesRef.current = files;
   messagesRef.current = messages;
+  logsRef.current = logs;
+  streamingRef.current = streaming;
 
   // ---- 模式判定（服务端 Key > 个人 BYOK > 演示模式）----
   useEffect(() => {
@@ -55,17 +70,24 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
       .catch(() => setMode("demo"));
   }, [keyVersion]);
 
-  // ---- 加载项目 ----
+  // ---- 加载项目 + 应用数据快照 ----
   useEffect(() => {
     setLoadState("loading");
     api<{ project: Project }>(`/api/projects/${id}`)
-      .then(({ project }) => {
+      .then(async ({ project }) => {
         setProject(project);
         setFiles(project.files);
         setPreviewFiles(project.files);
         setMessages(project.messages);
         setSelected(Object.keys(project.files)[0] ?? null);
         setLoadState("ok");
+        appDataRef.current = {};
+        try {
+          const { data } = await api<{ data: Record<string, string> }>(`/api/projects/${id}/data`);
+          appDataRef.current = data ?? {};
+        } catch {
+          /* 匿名/离线场景退化为内存态 */
+        }
       })
       .catch((e) => {
         if (e.status === 401) router.replace(`/login?next=/w/${id}`);
@@ -73,199 +95,262 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
       });
   }, [id, router]);
 
+  const persist = (body: Record<string, unknown>, label = "保存") => {
+    return api<{ project: Project }>(`/api/projects/${id}`, { method: "PATCH", body })
+      .then(({ project }) => {
+        setProject(project);
+        setSaveState("saved");
+        return project;
+      })
+      .catch((e) => {
+        toast(`${label}失败：${e.message}`, "err");
+        setSaveState("dirty");
+        throw e;
+      });
+  };
+
+  const pushAgentMsg = (text: string) => {
+    setMessages((m) => [...m, { role: "agent", text, ts: Date.now() }]);
+    api(`/api/projects/${id}`, { method: "PATCH", body: { appendMessages: [{ role: "agent", text }] } }).catch(
+      () => {}
+    );
+  };
+
+  // ================= 自检闭环 =================
+  const armRuntimeCheck = () => {
+    const t0 = Date.now();
+    readyAtRef.current = 0;
+    setTimeout(() => {
+      if (stopRef.current || streamingRef.current.active) return; // 新一轮已开始
+      const errs = logsRef.current.filter((l) => l.ts >= t0 - 500 && l.level === "error");
+      if (errs.length) {
+        runAutoRepair(
+          errs.slice(0, 5).map((l) => ({ file: "运行时", message: `沙箱运行报错：${l.text.slice(0, 200)}` }))
+        );
+      } else if (!readyAtRef.current) {
+        runAutoRepair([
+          { file: "index.html", message: "应用未能在沙箱中完成加载（未收到就绪信号），请检查脚本是否阻塞或存在致命错误" },
+        ]);
+      } else {
+        pushAgentMsg("✅ 自检通过：语法检查 + 沙箱运行均无错误，应用可正常使用。");
+        toast("自检通过 ✅", "ok");
+      }
+    }, RUNTIME_CHECK_MS);
+  };
+
+  const runAutoRepair = (issues: ValidationIssue[]) => {
+    const round = repairRoundRef.current + 1;
+    repairRoundRef.current = round;
+    if (round > MAX_REPAIR_ROUNDS) {
+      pushAgentMsg(
+        `❌ 自动修复 ${MAX_REPAIR_ROUNDS} 轮后仍未通过自检：\n` +
+          issues.map((i) => `· ${i.message}`).join("\n") +
+          `\n\n请打开「控制台」查看详细错误，或换个描述重新生成。`
+      );
+      toast("自检未通过，问题已在对话中列出", "err");
+      return;
+    }
+    pushAgentMsg(`⚠️ 自检发现问题，启动自动修复（第 ${round}/${MAX_REPAIR_ROUNDS} 轮）…`);
+    void send(
+      "【自动修复】自检发现以下问题，请修复并只输出需要修改的文件的完整内容：\n" +
+        issues.map((i) => `- ${i.file ? i.file + "：" : ""}${i.message}`).join("\n"),
+      { auto: true }
+    );
+  };
+
+  // ---- 生成完成收尾：落盘 + 启动自检 ----
+  const finalize = (instruction: string, agentText: string, wroteAny: boolean, stopped: boolean) => {
+    const finalFiles = filesRef.current;
+    const agentMsg =
+      (agentText.trim() || "已完成。") +
+      (stopped ? "\n（本轮已手动停止）" : "") +
+      "\n\n🔍 正在自检（语法检查 + 沙箱试运行）…";
+    setStreaming(IDLE_STREAMING);
+    setMessages((m) => [...m, { role: "agent", text: agentMsg, ts: Date.now() }]);
+    setPreviewFiles({ ...finalFiles });
+    setTab("preview");
+    const body: Record<string, unknown> = {
+      appendMessages: [
+        { role: "user", text: instruction },
+        { role: "agent", text: agentMsg },
+      ],
+    };
+    if (Object.keys(finalFiles).length > 0) body.files = finalFiles;
+    if (wroteAny) body.appendVersion = { label: instruction.slice(0, 24), files: finalFiles };
+    setSaveState("saving");
+    persist(body, "保存生成结果")
+      .then(() => wroteAny && toast("已保存新版本 ✅", "ok"))
+      .catch(() => {});
+    // 自检：先静态语法，后沙箱试运行
+    const issues = validateFiles(finalFiles);
+    if (issues.length) runAutoRepair(issues);
+    else armRuntimeCheck();
+  };
+
+  // ================= 核心：发送一轮 =================
+  const send = async (instruction: string, opts?: { auto?: boolean }) => {
+    const text = instruction.trim();
+    if (!text || streamingRef.current.active) return;
+    if (!opts?.auto) repairRoundRef.current = 0;
+    setMessages((m) => [...m, { role: "user", text, ts: Date.now() }]);
+    setStreaming({ active: true, plan: "", stage: "", thinking: "", currentPath: null, doneFiles: [] });
+    setLogs([]);
+    stopRef.current = false;
+    let stageText = "";
+    let wroteAny = false;
+
+    const handle = (ev: AgentEvent) => {
+      if (ev.type === "stage") {
+        const t = ev.text;
+        stageText += t;
+        setStreaming((s) => ({ ...s, stage: s.stage + t }));
+      } else if (ev.type === "thinking") {
+        const t = ev.text;
+        setStreaming((s) => ({ ...s, thinking: s.thinking + t }));
+      } else if (ev.type === "plan") {
+        const t = ev.text;
+        setStreaming((s) => ({ ...s, plan: s.plan + t }));
+      } else if (ev.type === "file_start") {
+        wroteAny = true;
+        const p = ev.path;
+        filesRef.current = { ...filesRef.current, [p]: "" };
+        setFiles(filesRef.current);
+        setStreaming((s) => ({ ...s, currentPath: p }));
+        setSelected(p);
+        setTab("code");
+      } else if (ev.type === "file_delta") {
+        const { path: p, delta: d } = ev;
+        const next = { ...filesRef.current, [p]: (filesRef.current[p] ?? "") + d };
+        filesRef.current = next;
+        setFiles(next);
+      } else if (ev.type === "file_end") {
+        const p = ev.path;
+        setStreaming((s) => ({
+          ...s,
+          doneFiles: [...s.doneFiles, p],
+          currentPath: s.currentPath === p ? null : s.currentPath,
+        }));
+      } else if (ev.type === "error") {
+        throw new Error(ev.message);
+      }
+    };
+
+    const runDemo = async () => {
+      for await (const ev of runDemoAgent(text, filesRef.current)) {
+        if (stopRef.current) break;
+        handle(ev);
+      }
+    };
+
+    try {
+      if (mode === "demo") {
+        await runDemo();
+      } else {
+        const ac = new AbortController();
+        abortRef.current = ac;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (mode === "byok") headers["x-llm-key"] = getLocalKey();
+        const res = await fetch("/api/agent", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            instruction: text,
+            history: messagesRef.current.slice(-8).map((m) => ({ role: m.role, text: m.text })),
+            files: filesRef.current,
+          }),
+          signal: ac.signal,
+        });
+        if (res.status === 400) {
+          const data = (await res.json().catch(() => ({}))) as { error?: string };
+          if (data.error === "NO_KEY") {
+            toast("未配置模型 Key，本轮已使用演示模式", "info");
+            setMode("demo");
+            await runDemo();
+          } else {
+            throw new Error(data.error ?? "请求失败");
+          }
+        } else if (!res.ok || !res.body) {
+          throw new Error(`模型请求失败（${res.status}）`);
+        } else {
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (stopRef.current) {
+              ac.abort();
+              break;
+            }
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+              if (line.trim()) handle(JSON.parse(line) as AgentEvent);
+            }
+          }
+        }
+      }
+      finalize(text, stageText, wroteAny, stopRef.current);
+    } catch (e) {
+      const err = e as Error;
+      if (err.name === "AbortError" || stopRef.current) {
+        finalize(text, stageText, wroteAny, true);
+      } else {
+        setStreaming(IDLE_STREAMING);
+        setMessages((m) => [
+          ...m,
+          { role: "agent", text: "⚠️ " + err.message + "\n可点击输入框重试，或在设置中检查 API Key。", ts: Date.now() },
+        ]);
+        toast(err.message, "err");
+      }
+    } finally {
+      abortRef.current = null;
+    }
+  };
+
   // ---- 首条需求自动发送（从「描述需求」新建时带 prefill）----
   useEffect(() => {
     if (loadState === "ok" && prefill && !autoSent.current && messages.length === 0 && !streaming.active) {
       autoSent.current = true;
-      send(prefill);
+      void send(prefill);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadState]);
-
-  const persist = useCallback(
-    (body: Record<string, unknown>, label = "保存") => {
-      return api<{ project: Project }>(`/api/projects/${id}`, { method: "PATCH", body })
-        .then(({ project }) => {
-          setProject(project);
-          setSaveState("saved");
-          return project;
-        })
-        .catch((e) => {
-          toast(`${label}失败：${e.message}`, "err");
-          setSaveState("dirty");
-          throw e;
-        });
-    },
-    [id]
-  );
-
-  // ---- 生成完成收尾：落盘消息 + 版本快照，切预览 ----
-  const finalize = useCallback(
-    (instruction: string, agentText: string, wroteAny: boolean, stopped: boolean) => {
-      const finalFiles = filesRef.current;
-      const agentMsg = (agentText.trim() || "已完成。") + (stopped ? "\n（本轮已手动停止）" : "");
-      setStreaming(IDLE_STREAMING);
-      setMessages((m) => [...m, { role: "agent", text: agentMsg, ts: Date.now() }]);
-      setPreviewFiles({ ...finalFiles });
-      setTab("preview");
-      const body: Record<string, unknown> = {
-        appendMessages: [
-          { role: "user", text: instruction },
-          { role: "agent", text: agentMsg },
-        ],
-      };
-      if (Object.keys(finalFiles).length > 0) body.files = finalFiles;
-      if (wroteAny) body.appendVersion = { label: instruction.slice(0, 24), files: finalFiles };
-      setSaveState("saving");
-      persist(body, "保存生成结果").then(() => wroteAny && toast("已保存新版本 ✅", "ok"));
-    },
-    [persist]
-  );
-
-  // ---- 核心：发送一轮 ----
-  const send = useCallback(
-    async (instruction: string) => {
-      const text = instruction.trim();
-      if (!text || streaming.active) return;
-      setMessages((m) => [...m, { role: "user", text, ts: Date.now() }]);
-      setStreaming({ active: true, plan: "", stage: "", thinking: "", currentPath: null, doneFiles: [] });
-      setLogs([]);
-      stopRef.current = false;
-      let stageText = "";
-      let wroteAny = false;
-
-      const handle = (ev: AgentEvent) => {
-        if (ev.type === "stage") {
-          const t = ev.text;
-          stageText += t;
-          setStreaming((s) => ({ ...s, stage: s.stage + t }));
-        } else if (ev.type === "thinking") {
-          const t = ev.text;
-          setStreaming((s) => ({ ...s, thinking: s.thinking + t }));
-        } else if (ev.type === "plan") {
-          const t = ev.text;
-          setStreaming((s) => ({ ...s, plan: s.plan + t }));
-        } else if (ev.type === "file_start") {
-          wroteAny = true;
-          const p = ev.path;
-          filesRef.current = { ...filesRef.current, [p]: "" };
-          setFiles(filesRef.current);
-          setStreaming((s) => ({ ...s, currentPath: p }));
-          setSelected(p);
-          setTab("code");
-        } else if (ev.type === "file_delta") {
-          const { path: p, delta: d } = ev;
-          const next = { ...filesRef.current, [p]: (filesRef.current[p] ?? "") + d };
-          filesRef.current = next;
-          setFiles(next);
-        } else if (ev.type === "file_end") {
-          const p = ev.path;
-          setStreaming((s) => ({
-            ...s,
-            doneFiles: [...s.doneFiles, p],
-            currentPath: s.currentPath === p ? null : s.currentPath,
-          }));
-        } else if (ev.type === "error") {
-          throw new Error(ev.message);
-        }
-      };
-
-      const runDemo = async () => {
-        for await (const ev of runDemoAgent(text, filesRef.current)) {
-          if (stopRef.current) break;
-          handle(ev);
-        }
-      };
-
-      try {
-        if (mode === "demo") {
-          await runDemo();
-        } else {
-          const ac = new AbortController();
-          abortRef.current = ac;
-          const headers: Record<string, string> = { "Content-Type": "application/json" };
-          if (mode === "byok") headers["x-llm-key"] = getLocalKey();
-          const res = await fetch("/api/agent", {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              instruction: text,
-              history: messagesRef.current.slice(-8).map((m) => ({ role: m.role, text: m.text })),
-              files: filesRef.current,
-            }),
-            signal: ac.signal,
-          });
-          if (res.status === 400) {
-            const data = (await res.json().catch(() => ({}))) as { error?: string };
-            if (data.error === "NO_KEY") {
-              toast("未配置模型 Key，本轮已使用演示模式", "info");
-              setMode("demo");
-              await runDemo();
-            } else {
-              throw new Error(data.error ?? "请求失败");
-            }
-          } else if (!res.ok || !res.body) {
-            throw new Error(`模型请求失败（${res.status}）`);
-          } else {
-            const reader = res.body.getReader();
-            const dec = new TextDecoder();
-            let buf = "";
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              if (stopRef.current) {
-                ac.abort();
-                break;
-              }
-              buf += dec.decode(value, { stream: true });
-              const lines = buf.split("\n");
-              buf = lines.pop() ?? "";
-              for (const line of lines) {
-                if (line.trim()) handle(JSON.parse(line) as AgentEvent);
-              }
-            }
-          }
-        }
-        finalize(text, stageText, wroteAny, stopRef.current);
-      } catch (e) {
-        const err = e as Error;
-        if (err.name === "AbortError" || stopRef.current) {
-          finalize(text, stageText, wroteAny, true);
-        } else {
-          setStreaming(IDLE_STREAMING);
-          setMessages((m) => [...m, { role: "agent", text: "⚠️ " + err.message + "\n可点击输入框重试，或在设置中检查 API Key。", ts: Date.now() }]);
-          toast(err.message, "err");
-        }
-      } finally {
-        abortRef.current = null;
-      }
-    },
-    [mode, streaming.active, finalize]
-  );
 
   const stop = () => {
     stopRef.current = true;
     abortRef.current?.abort();
   };
 
-  // ---- 人工编辑文件：防抖自动保存 + 刷新预览 ----
-  const onFileSave = useCallback(
-    (path: string, content: string) => {
-      const next = { ...filesRef.current, [path]: content };
-      filesRef.current = next;
-      setFiles(next);
-      setPreviewFiles({ ...next });
-      setSaveState("saving");
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
-        if (Object.keys(filesRef.current).length > 0) {
-          persist({ files: filesRef.current }, "保存修改");
-        }
-      }, 1200);
+  // ---- 人工编辑文件：语法校验 + 防抖自动保存 + 刷新预览 ----
+  const onFileSave = (path: string, content: string) => {
+    const next = { ...filesRef.current, [path]: content };
+    filesRef.current = next;
+    setFiles(next);
+    setPreviewFiles({ ...next });
+    const issues = validateFiles(next).filter((i) => i.file === path);
+    if (issues.length) {
+      toast(`⚠️ ${issues[0].file}：${issues[0].message}（已保存，预览可能无法运行，请检查）`, "err");
+    } else {
       toast("已应用修改，预览已刷新", "ok");
-    },
-    [persist]
-  );
+    }
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      if (Object.keys(filesRef.current).length > 0) {
+        persist({ files: filesRef.current }, "保存修改");
+      }
+    }, 1200);
+  };
+
+  // ---- 持久化桥：沙箱 localStorage 变更 → 落库 ----
+  const onDataSave = (data: Record<string, string>) => {
+    if (dataSaveTimer.current) clearTimeout(dataSaveTimer.current);
+    dataSaveTimer.current = setTimeout(() => {
+      api(`/api/projects/${id}/data`, { method: "PUT", body: { data } }).catch(() => {});
+    }, 800);
+  };
 
   const renameProject = (title: string) => {
     if (!title.trim()) return;
@@ -295,7 +380,10 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
     downloadText(`${safeName}.html`, assembleDocument(filesRef.current), "text/html");
   };
 
-  const previewDoc = useMemo(() => assembleDocument(previewFiles), [previewFiles]);
+  const previewDoc = useMemo(
+    () => assembleDocument(previewFiles, appDataRef.current),
+    [previewFiles]
+  );
 
   // ---- 渲染 ----
   if (loadState === "loading") {
@@ -367,13 +455,7 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
       {/* 主体 */}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <aside className="h-[46%] shrink-0 border-b border-white/5 lg:h-auto lg:w-[390px] lg:border-b-0 lg:border-r">
-          <ChatPanel
-            messages={messages}
-            streaming={streaming}
-            mode={mode}
-            onSend={send}
-            onStop={stop}
-          />
+          <ChatPanel messages={messages} streaming={streaming} mode={mode} onSend={send} onStop={stop} />
         </aside>
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -398,6 +480,8 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
                   onLog={(l) => setLogs((prev) => [...prev.slice(-99), l])}
                   onClearLogs={() => setLogs([])}
                   projectTitle={project.title}
+                  onDataSave={onDataSave}
+                  onReady={() => (readyAtRef.current = Date.now())}
                 />
               </div>
             ) : (

@@ -68,9 +68,13 @@ var state = {
     { id: 3, text: '完成今天最重要的三件事', done: false }
   ]
 };
+// 存储规范：键不存在（首次使用）才用默认数据；已存储（包括空数组=用户已清空）一律以存储为准
 try {
-  var saved = JSON.parse(localStorage.getItem(KEY) || 'null');
-  if (saved && saved.length) state.todos = saved;
+  var raw = localStorage.getItem(KEY);
+  if (raw !== null) {
+    var saved = JSON.parse(raw);
+    if (Array.isArray(saved)) state.todos = saved;
+  }
 } catch (e) {}
 function save() { try { localStorage.setItem(KEY, JSON.stringify(state.todos)); } catch (e) {} }
 function render() {

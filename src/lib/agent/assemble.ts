@@ -1,12 +1,19 @@
 // 预览组装器（纯函数，前后端通用）：
 // 将多文件(index.html + *.css/*.js)组装为单个自包含 HTML 文档，并注入沙箱 harness。
+// 可选注入应用数据快照（__MOL_DATA__），配合 harness 持久化桥恢复 localStorage。
 // 安全：生成代码只在 sandbox="allow-scripts" 的 iframe 中运行（无 same-origin），
-// harness 提供 localStorage 内存垫片（沙箱下真实 localStorage 会抛 SecurityError）、
-// alert/confirm 拦截、console/错误捕获（postMessage 给父页）。
+// harness 提供 localStorage 内存垫片、alert/confirm 拦截、console/错误捕获（postMessage 给父页）。
 import { HARNESS_JS } from "./harness";
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 数据快照序列化（防 </script> 截断） */
+function dataScript(appData: Record<string, string> | null | undefined): string {
+  if (!appData || Object.keys(appData).length === 0) return "";
+  const json = JSON.stringify(appData).replace(/</g, "\\u003c");
+  return `<script>window.__MOL_DATA__=${json};</script>\n`;
 }
 
 /** 将外链 css/js 内联；引用缺失时注入 head/body 尾部 */
@@ -51,14 +58,18 @@ function fallbackDoc(files: Record<string, string>): string {
 </html>`;
 }
 
-export function assembleDocument(files: Record<string, string>): string {
+export function assembleDocument(
+  files: Record<string, string>,
+  appData?: Record<string, string> | null
+): string {
   const html = files["index.html"] ?? fallbackDoc(files);
   let out = inlineAll(html, files);
-  // 注入 harness：紧跟 <head>（保证先于应用代码执行）
+  // 注入数据快照 + harness：紧跟 <head>（保证先于应用代码执行）
+  const head = `\n${dataScript(appData)}<script>${HARNESS_JS}</script>`;
   if (/<head[^>]*>/i.test(out)) {
-    out = out.replace(/<head[^>]*>/i, (m) => `${m}\n<script>${HARNESS_JS}</script>`);
+    out = out.replace(/<head[^>]*>/i, (m) => m + head);
   } else {
-    out = `<head><meta charset="utf-8"><script>${HARNESS_JS}</script></head>\n${out}`;
+    out = `<head><meta charset="utf-8">${head}</head>\n${out}`;
   }
   return out;
 }

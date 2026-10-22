@@ -60,4 +60,19 @@ describe("assembleDocument", () => {
     expect(out).toContain("<!DOCTYPE");
     expect(out).toContain("console.log(1)");
   });
+
+  it("注入应用数据快照（持久化桥）：位于 harness 之前且防 </script> 截断", () => {
+    const out = assembleDocument(
+      { "index.html": "<html><head></head><body></body></html>", "app.js": "var a=1;" },
+      { "mol-todo-v1": '[{"text":"</script>x"}]' }
+    );
+    expect(out).toContain("window.__MOL_DATA__=");
+    expect(out).not.toContain('"text":"</script>');
+    expect(out.indexOf("__MOL_DATA__")).toBeLessThan(out.indexOf("__molecules"));
+  });
+
+  it("空快照不注入数据脚本", () => {
+    const out = assembleDocument({ "index.html": "<html><head></head><body></body></html>" }, {});
+    expect(out).not.toContain("window.__MOL_DATA__=");
+  });
 });
