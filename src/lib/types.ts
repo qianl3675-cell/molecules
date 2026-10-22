@@ -48,6 +48,7 @@ export interface ProjectMeta {
 /** Agent 事件协议：真模型（服务端 NDJSON 流）与演示模式（本地生成器）共用 */
 export type AgentEvent =
   | { type: "stage"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "plan"; text: string }
   | { type: "file_start"; path: string }
   | { type: "file_delta"; path: string; delta: string }

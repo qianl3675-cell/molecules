@@ -19,7 +19,7 @@ import { downloadText } from "@/lib/utils";
 import type { AgentEvent, ChatMessage, Project, VersionSnapshot } from "@/lib/types";
 import { ArrowLeft, Download, History, Settings, Share2 } from "lucide-react";
 
-const IDLE_STREAMING: StreamingState = { active: false, plan: "", stage: "", currentPath: null, doneFiles: [] };
+const IDLE_STREAMING: StreamingState = { active: false, plan: "", stage: "", thinking: "", currentPath: null, doneFiles: [] };
 
 export function Workspace({ id, prefill }: { id: string; prefill: string }) {
   const router = useRouter();
@@ -128,7 +128,7 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
       const text = instruction.trim();
       if (!text || streaming.active) return;
       setMessages((m) => [...m, { role: "user", text, ts: Date.now() }]);
-      setStreaming({ active: true, plan: "", stage: "", currentPath: null, doneFiles: [] });
+      setStreaming({ active: true, plan: "", stage: "", thinking: "", currentPath: null, doneFiles: [] });
       setLogs([]);
       stopRef.current = false;
       let stageText = "";
@@ -139,6 +139,9 @@ export function Workspace({ id, prefill }: { id: string; prefill: string }) {
           const t = ev.text;
           stageText += t;
           setStreaming((s) => ({ ...s, stage: s.stage + t }));
+        } else if (ev.type === "thinking") {
+          const t = ev.text;
+          setStreaming((s) => ({ ...s, thinking: s.thinking + t }));
         } else if (ev.type === "plan") {
           const t = ev.text;
           setStreaming((s) => ({ ...s, plan: s.plan + t }));

@@ -9,18 +9,21 @@ import { SYSTEM_PROMPT, buildUserContent, type AgentTurn } from "./prompt";
 const BASE_URL = process.env.ANTHROPIC_BASE_URL?.trim() || "";
 
 export const DEFAULT_MODEL =
-  process.env.AGENT_MODEL?.trim() || (BASE_URL ? "glm-5.1" : "claude-opus-5-5");
+  process.env.AGENT_MODEL?.trim() || (BASE_URL ? "glm-5.3" : "claude-opus-5-5");
 const MAX_TOKENS = Number(process.env.AGENT_MAX_TOKENS || 16000);
 
 export function hasServerKey(): boolean {
   return !!process.env.ANTHROPIC_API_KEY;
 }
 
-/** 生成文本增量流（供 API 路由接入解析器） */
-export async function* streamAgentText(
+/** 流式增量：正文 text / 思考过程 thinking（思考也转发，避免长思考期间连接无输出） */
+export type ModelChunk = { kind: "text" | "thinking"; delta: string };
+
+/** 生成增量流（供 API 路由接入解析器） */
+export async function* streamAgentChunks(
   turn: AgentTurn,
   apiKey: string
-): AsyncGenerator<string, void, undefined> {
+): AsyncGenerator<ModelChunk, void, undefined> {
   const isOfficial = !BASE_URL || /anthropic\.com/i.test(BASE_URL);
   // 兼容端点（如智谱）同样走 x-api-key 头认证
   const client = new Anthropic({ apiKey, ...(BASE_URL ? { baseURL: BASE_URL } : {}) });
@@ -39,8 +42,11 @@ export async function* streamAgentText(
     : client.messages.stream(params);
 
   for await (const event of stream) {
-    if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-      yield event.delta.text;
+    if (event.type !== "content_block_delta") continue;
+    if (event.delta.type === "text_delta") {
+      yield { kind: "text", delta: event.delta.text };
+    } else if (event.delta.type === "thinking_delta") {
+      yield { kind: "thinking", delta: event.delta.thinking };
     }
   }
 }

@@ -11,6 +11,7 @@ export interface StreamingState {
   active: boolean;
   plan: string;
   stage: string;
+  thinking: string;
   currentPath: string | null;
   doneFiles: string[];
 }
@@ -34,10 +35,15 @@ export function ChatPanel({
 }) {
   const [text, setText] = useState(initialText ?? "");
   const listRef = useRef<HTMLDivElement>(null);
+  const thinkRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.length, streaming.stage, streaming.plan]);
+
+  useEffect(() => {
+    if (thinkRef.current) thinkRef.current.scrollTop = thinkRef.current.scrollHeight;
+  }, [streaming.thinking]);
 
   const submit = () => {
     const t = text.trim();
@@ -95,6 +101,15 @@ export function ChatPanel({
               <Bot size={14} />
             </span>
             <div className="w-[85%] rounded-2xl rounded-tl-md bg-ink-800 px-3.5 py-3 text-[13px]">
+              {streaming.thinking && !streaming.currentPath && (
+                <div
+                  ref={thinkRef}
+                  className="mb-2 max-h-24 overflow-y-auto whitespace-pre-wrap rounded-lg bg-ink-900 px-2.5 py-1.5 font-mono text-[11px] leading-4 text-zinc-500"
+                >
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-brand-400/70">thinking…</span>
+                  {streaming.thinking.slice(-800)}
+                </div>
+              )}
               {streaming.stage && (
                 <p className="whitespace-pre-wrap leading-6 text-zinc-200">{streaming.stage}</p>
               )}

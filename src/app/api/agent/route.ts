@@ -3,7 +3,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth";
 import { bad } from "@/lib/http";
-import { streamAgentText, describeAgentError } from "@/lib/agent/anthropic";
+import { streamAgentChunks, describeAgentError } from "@/lib/agent/anthropic";
 import { AgentStreamParser } from "@/lib/agent/parser";
 import { sanitizeFiles } from "@/lib/http";
 import type { AgentEvent, ChatMessage } from "@/lib/types";
@@ -43,9 +43,15 @@ export async function POST(req: NextRequest) {
           /* 客户端断开 */
         }
       };
+      // 心跳：立即下发首字节，刷新代理链路（长思考期间连接不再空转）
+      send({ type: "stage", text: "" });
       try {
-        for await (const text of streamAgentText({ history, files, instruction }, key)) {
-          for (const ev of parser.push(text)) send(ev);
+        for await (const chunk of streamAgentChunks({ history, files, instruction }, key)) {
+          if (chunk.kind === "thinking") {
+            send({ type: "thinking", text: chunk.delta });
+          } else {
+            for (const ev of parser.push(chunk.delta)) send(ev);
+          }
         }
         for (const ev of parser.end()) send(ev);
         send({ type: "done" });
