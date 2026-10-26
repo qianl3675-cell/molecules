@@ -4,6 +4,8 @@
 > 用户用自然语言描述需求 → 智能体流式生成代码（计划 → 多文件代码）→ 生成的应用以可视化网页实时预览 → 可继续对话迭代 → 数据持久化 → 可分享。
 >
 > 产品名 **Molecules**：致敬 Atoms——原子组合成分子。
+>
+> **v2 修订（2026-10-22）**：根据笔试评审反馈新增「生成后自检闭环」与「应用数据持久化桥」，2048 完整实现纳入模板库；实际部署平台为 Render + Upstash + 智谱 GLM（glm-5.1）。详见 §6 v2 小节、§8 R16/R17、§9/§10 实测记录。
 
 ---
 
@@ -17,7 +19,7 @@
 | 数据持久化 | 服务端存储适配层：Upstash Redis（云）/ JSON 文件（本地/自托管），账户、项目、版本全落盘 |
 | 基本使用流程 | 注册 / 登录 / 一键游客体验 → 新建应用（描述或模板）→ Agent 生成 → 预览与迭代 |
 | 至少一个延展能力 | ① 版本历史与一键回滚 ② 公开分享链接 + Remix ③ 人工直接编辑代码与 AI 协同 ④ 模板库 |
-| 可测试在线链接 + GitHub 源码 | Vercel 一键部署（附 Upstash/Key 配置指引），零密钥也可完整体验 |
+| 可测试在线链接 + GitHub 源码 | 线上部署于 **Render**（免费档）+ Upstash Redis + 智谱 GLM；亦支持 Vercel / 任意 Node 宿主，零密钥也可完整体验 |
 | 简要说明文档 | README + 本 DESIGN + SUBMISSION |
 
 **明确不做（取舍）**：真实多租户计费、复杂权限体系、生成 React/Next 多文件工程与构建（Demo 生成的目标应用限定为「自包含单页 Web 应用」，无构建步骤——这是复杂度控制的关键取舍，理由见 §8-R2）。
@@ -28,11 +30,11 @@
 
 | 层 | 选择 | 理由 |
 |---|---|---|
-| 框架 | Next.js 15（App Router）+ TypeScript | 前后端一体、API Routes 内置流式响应、Vercel 免费一键部署，单人 6-8h 内可完成的最短路径 |
+| 框架 | Next.js 15（App Router）+ TypeScript | 前后端一体、API Routes 内置流式响应，静态托管/Serverless 均可部署，单人 6-8h 内可完成的最短路径 |
 | UI | TailwindCSS 3 + lucide-react + prismjs | 手写少量组件（Button/Modal/Tabs/Toast），不引重组件库，控制复杂度 |
 | 认证 | 用户名+密码（bcryptjs）+ HMAC 签名 Cookie 会话 | 无第三方依赖、无邮件依赖；Demo 场景下够用且安全基线清晰 |
 | 存储 | 适配器模式：**Upstash Redis（REST）** / **本地 JSON 文件** / 内存兜底 | 见 §5，是本方案工程思维的核心展示点 |
-| LLM | Anthropic Messages API（服务端流式代理） | 服务端持钥（env）或用户 BYOK（请求头，不落盘）；演示模式无钥可用 |
+| LLM | Anthropic 协议（官方 API / 智谱 GLM 兼容端点，服务端流式代理） | 双供应商一套代码：官方走 beta+refusal fallback，兼容端点走原生 /v1/messages；服务端持钥（env）或用户 BYOK（请求头，不落盘）；演示模式无钥可用 |
 | 测试 | vitest 单测（纯逻辑层）+ next build + curl 冒烟 | 覆盖正确性关键路径，成本可控 |
 
 ## 3. 总体架构
@@ -57,7 +59,7 @@
 ```
 
 - **生成目标格式**：Agent 产出 `index.html`（+可选 `style.css`、`app.js` 等少量文件）。预览时组装器把 CSS/JS 内联进 HTML，并注入 harness 脚本，经 `blob:` URL 放入 `sandbox="allow-scripts"` 的 iframe。
-- **事件协议（NDJSON）**：`{type:'stage'|'plan'|'plan_step_done'|'file_start'|'file_delta'|'file_end'|'done'|'error'}`，同一协议同时驱动「真模型」与「演示模式」，前端无感知差异。
+- **事件协议（NDJSON）**：`{type:'stage'|'thinking'|'plan'|'file_start'|'file_delta'|'file_end'|'done'|'error'}`，同一协议同时驱动「真模型」与「演示模式」，前端无感知差异。v2 新增 `thinking`（思考增量实时转发）与首字节心跳（响应立即下发空 stage 事件，避免长思考期间代理链路空转挂起）。
 
 ## 4. 数据模型
 
@@ -82,7 +84,7 @@ API：
 
 统一 `Store` 接口（getUser/upsertUser/listProjects/getProject/saveProject/deleteProject）：
 
-1. **UpstashAdapter**：环境变量存在时启用。纯 `fetch` 调 REST（不引 SDK），单键存整个项目 JSON + `user:{id}:projects` 集合做索引。Serverless（Vercel）下真实持久化。
+1. **UpstashAdapter**：环境变量存在时启用。纯 `fetch` 调 REST（不引 SDK），单键存整个项目 JSON + `user:{id}:projects` 集合做索引；**管道端点实测为 `/pipeline` 路径**（`?pipeline=true` 查询参数不被识别，已用 mock fetch 单测锁死协议）。Serverless（Render/Vercel）下真实持久化。
 2. **FileAdapter**：本地/自托管默认。单 JSON 文件 + 临时文件 rename 原子写。
 3. **MemoryAdapter**：FS 不可写时的兜底（部署忘配 Upstash 也不至于 500），启动时告警提示。
 
@@ -100,7 +102,16 @@ API：
 
 **安全模型**：生成代码=不可信代码。iframe 仅 `sandbox="allow-scripts"`（无 same-origin，无法触达父页 DOM/Cookie/localStorage 与同源接口）；分享页同理。
 
-**演示模式（无任何 API Key 可用）**：`agent/status` 返回 `demo` 时，前端运行本地确定性智能体——意图识别（待办/番茄钟/贪吃蛇/落地页/计算器/看板 + 兜底）+ 内置高质量模板 + 打字机式流式事件（同一协议），并明确标注「演示模式」。保证 HR 打开部署链接无需任何配置即可完整走通主流程。
+**演示模式（无任何 API Key 可用）**：`agent/status` 返回 `demo` 时，前端运行本地确定性智能体——意图识别（待办/番茄钟/贪吃蛇/落地页/计算器/2048 + 个性化兜底）+ 内置高质量模板 + 打字机式流式事件（同一协议），并明确标注「演示模式」。保证 HR 打开部署链接无需任何配置即可完整走通主流程。
+
+**v2 新增：生成后自检闭环**（响应评审反馈）。每轮生成/自动修复完成后自动执行：
+1. 静态校验（validateFiles）：JS 用 `new Function` 只编译不执行（可捕获语法错误且无副作用）、CSS 花括号配对、HTML 结束标签与 app.js 引用检查；
+2. 沙箱试运行：4.5s 错误观察窗，收集 harness 上报的运行时错误与就绪（load）信号；
+3. 有问题 → 把错误清单回喂模型**自动修复（≤2 轮）**，全程在对话中可见；通过才提示「✅ 已完成」，失败给出明确问题清单与控制台入口；人工编辑代码同样实时校验。
+
+**v2 新增：应用数据持久化桥**（响应评审反馈）。沙箱 iframe 无 same-origin、无法访问真实 localStorage——不允许加 `allow-same-origin`（等于拆掉沙箱）。解法：harness 的 localStorage 垫片以注入的 `__MOL_DATA__` 快照初始化，任何写操作防抖 400ms 后 postMessage 上报父页，父页再防抖 800ms 落库到 `pd:{projectId}:{userId}`（项目×用户维度，≤50 键/32KB）；打开预览时注入快照恢复——刷新/重开项目/退出重登数据完整保留。系统提示词同步增加硬性存储规范：`getItem() !== null` 才视为首次使用，空状态（如空任务列表）是合法数据，绝不重灌默认值。
+
+**模型选型实录（v2）**：一套代码双供应商——官方 Anthropic（beta + refusal fallback）与智谱 GLM 兼容端点（原生 /v1/messages）。实测 glm-5.3「始终深度思考且不可关闭」（错误码 1210），思考会吞掉 max_tokens 并导致长时间无正文输出；定版 **glm-5.1**（即问即写，40-60s 出完整应用）。配套两项流式加固：thinking 增量转发为独立事件（用户实时可见）、响应先发首字节心跳（实测首字节从挂起 240s → 1-4s）。
 
 ## 7. 页面与交互
 
@@ -136,15 +147,22 @@ API：
 
 **评审结论**：方案通过，进入开发。开发顺序：脚手架 → 纯逻辑层（parser/assemble/auth/store，含单测）→ API → 前端 → 联调冒烟 → 文档。
 
-## 9. 测试计划
+**v2 追加评审（笔试评审反馈，2026-10-22）**：
 
-1. **单测（vitest）**：流式解析器（含切分边界/围栏/无计划）、组装器（内联替换/harness 注入/缺引用）、演示模式意图识别、Cookie 签名校验、文件存储适配器（原子写、CRUD）。
-2. **构建验证**：`next build` 通过（TS 严格模式）。
-3. **冒烟（curl，针对 dev/start 服务）**：注册→登录→me→建项目（模板）→PATCH 改文件→公开→匿名读分享→删除→登出；agent 无钥时 status=demo；带假 Key 请求返回流式 error 事件而非崩溃。
-4. **人工验证清单**（本地浏览器）：主流程 + 预览控制台 + 回滚 + Remix。
+- **R16 生成产物缺运行验证（评审实例：2048 空棋盘、迭代后语法错误）**。结论：新增自检闭环（见 §6）——语法校验 + 沙箱试运行 + 自动修复 + 明确成败提示；2048 完整实现纳入模板库，核心算法（slide/lineIdx）从模板源码提取做真实单测。通过。
+- **R17 沙箱内存垫片导致应用数据不持久（评审实例：待办刷新丢数据、删空后默认任务复活）**。结论：垫片升级为持久化桥（见 §6）；「删空 vs 首次」由提示词硬性规范 + 模板修复 + 单测三重保障，线上实测新生成代码已符合规范。R2 中「预览态数据不跨刷新保留」的限制就此解除。通过。
 
-## 10. 部署与交付
+## 9. 测试计划（v2 实测数据）
 
-- GitHub：本仓库（含 README 快速开始）。
-- Vercel：导入仓库 → 配置 `UPSTASH_REDIS_REST_URL/TOKEN`（免费档，指引见 README）→ 可选 `ANTHROPIC_API_KEY`（不配则 BYOK/演示模式）→ 部署即得公开链接。
-- 交付文档：`README.md`（使用+部署）、`docs/DESIGN.md`（本方案+评审）、`SUBMISSION.md`（按笔试文档第 4 节格式整理的回收内容）。
+1. **单测（vitest，42/42 通过）**：流式解析器（含随机切块等价性/围栏/漏闭合）、组装器（内联替换/harness 注入/数据快照注入与 `</script>` 转义）、校验器 validateFiles（5 例）、2048 核心算法（从模板源码提取 slide/lineIdx 真实验证，6 例）、演示模式意图识别与事件流、Cookie 签名防篡改、文件存储适配器（原子写/CRUD/slug 索引）、Upstash 适配器（mock fetch 锁死 `/pipeline` 管道协议，4 例）。
+2. **构建验证**：`next build` 通过（TS 严格模式，15 条路由）。
+3. **冒烟（curl，本地 13 步 + 线上复测）**：注册→登录→me→建项目（模板）→PATCH 改文件→公开→匿名读分享→Remix→鉴权 401/404→删除→登出；agent 无钥 400 NO_KEY、假 Key 返回流式 error 事件而非崩溃；数据持久化 API 往返；真模型全链路流式生成（首字节 1-4s，完整三文件应用）。
+4. **人工验证清单**（浏览器）：主流程 + 预览控制台 + 回滚 + Remix + 持久化桥（刷新/重开/重登场景）。
+
+## 10. 部署与交付（v2 实际部署记录）
+
+- **线上**：Render 免费档（`npm install && npm run build` / `npm start` / Free 实例），环境变量：智谱 Key + `ANTHROPIC_BASE_URL` + `AGENT_MODEL=glm-5.1` + Upstash×2 + `AUTH_SECRET`。约 15 分钟无访问休眠，首访约 1 分钟唤醒。
+- **持久化**：Upstash Redis（管道端点 `/pipeline`，见 §5 踩坑记录）。
+- **平台选型实录**：Vercel（新账号手机验证被临时封锁 12h）→ Railway（试用风控暂停部署）→ **Render**（GitHub 一键登录、无手机验证、长流式请求稳定）落地。期间自建 `/api/probe` 出网诊断接口做排除法（实测平台出网 1.3s 正常，证伪"连不上智谱"假设，真正原因是 glm-5.3 长思考，见 §6）。
+- 亦可部署于 Vercel / 任意 Node 宿主 / Docker（README 附指引）。
+- 交付文档：`README.md`（使用+部署）、`docs/DESIGN.md`（本方案+评审+v2 修订）、`SUBMISSION.md`（笔试回收内容 + 评审反馈响应）。
